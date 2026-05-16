@@ -378,7 +378,15 @@ async function fetchPage({ browseId, params, includeChips = false, includeBackgr
 }
 
 app.get("/", (_req, res) => {
-  res.json({ status: "ok", message: "YouTube.js API is running" });
+  res.json({
+    status: "ok",
+    message: "YouTube.js API is running",
+    session: {
+      cookie: !!process.env.YT_COOKIE,
+      visitor_data: !!process.env.YT_VISITOR_DATA,
+      po_token: !!process.env.YT_PO_TOKEN,
+    },
+  });
 });
 
 // ─── Home ─────────────────────────────────────────────────────────────────────
