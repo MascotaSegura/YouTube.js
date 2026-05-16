@@ -721,6 +721,25 @@ if (!fs.existsSync(AUDIO_DIR)) {
   fs.mkdirSync(AUDIO_DIR, { recursive: true });
 }
 
+// Rutina de limpieza periódica (cada 10 minutos)
+setInterval(() => {
+  try {
+    const files = fs.readdirSync(AUDIO_DIR);
+    const now = Date.now();
+    for (const file of files) {
+      const filePath = path.join(AUDIO_DIR, file);
+      const stat = fs.statSync(filePath);
+      // Eliminar archivos más antiguos de 1 hora
+      if (now - stat.mtimeMs > 60 * 60 * 1000) {
+        fs.unlinkSync(filePath);
+        console.log(`[cleanup] Eliminado archivo de caché expirado: ${file}`);
+      }
+    }
+  } catch (err) {
+    console.error("[cleanup] Error limpiando caché:", err);
+  }
+}, 10 * 60 * 1000);
+
 app.get("/api/stream", async (req, res) => {
   try {
     const { video_id } = req.query;
@@ -746,7 +765,7 @@ app.get("/api/stream", async (req, res) => {
       setTimeout(() => streamCache.delete(video_id), 3 * 60 * 60 * 1000);
     }
 
-    const { url: fmtUrl, userAgent } = streamData;
+    const { url: fmtUrl, mimeType, totalSize, userAgent } = streamData;
 
     // Descargamos el archivo a nuestro servidor
     const upstream = await fetch(fmtUrl, {
@@ -761,18 +780,21 @@ app.get("/api/stream", async (req, res) => {
       return res.status(upstream.status).json({ error: "Error al obtener audio" });
     }
 
-    // Guardamos el archivo en disco (se sube a nuestro servidor)
+    // Guardamos el archivo en disco (se sube a nuestro servidor) y servimos al mismo tiempo
     const fileStream = fs.createWriteStream(filePath);
-    Readable.fromWeb(upstream.body).pipe(fileStream);
+    const nodeStream = Readable.fromWeb(upstream.body);
 
-    fileStream.on("finish", () => {
-      // Una vez descargado, lo servimos localmente
-      res.sendFile(filePath);
-    });
+    const upstreamLen = parseInt(upstream.headers.get("content-length") ?? "0");
+
+    res.status(200);
+    res.setHeader("Content-Type", mimeType);
+    if (upstreamLen) res.setHeader("Content-Length", upstreamLen);
+
+    nodeStream.pipe(fileStream);
+    nodeStream.pipe(res);
 
     fileStream.on("error", (err) => {
       console.error("[stream] error saving file:", err);
-      if (!res.headersSent) res.status(500).json({ error: "Error al guardar el archivo" });
     });
 
   } catch (e) {
