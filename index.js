@@ -25,68 +25,102 @@ initYoutube().catch((err) => {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * Extract a string from a Text object (SDK object, not raw JSON).
+ * SDK Text objects have .text property directly.
+ */
 function getText(obj) {
     if (!obj) return null;
     if (typeof obj === 'string') return obj;
-    if (obj.text) return obj.text;
-    if (obj.runs?.[0]?.text) return obj.runs[0].text;
-    return null;
+    if (typeof obj.text === 'string') return obj.text;
+    if (Array.isArray(obj.runs) && obj.runs[0]?.text) return obj.runs[0].text;
+    return String(obj) !== '[object Object]' ? String(obj) : null;
 }
 
-function getThumbnail(arr) {
-    if (!Array.isArray(arr) || arr.length === 0) return null;
-    return arr[0].url ?? null;
+/**
+ * Extract thumbnail URL from SDK thumbnail array or object.
+ */
+function getThumbnail(thumbnails) {
+    if (!thumbnails) return null;
+    const arr = Array.isArray(thumbnails) ? thumbnails : thumbnails?.contents ?? [];
+    if (arr.length === 0) return null;
+    // Prefer best quality (largest)
+    const best = arr.reduce((a, b) =>
+        ((b.width ?? 0) > (a.width ?? 0) ? b : a), arr[0]);
+    return best?.url ?? null;
 }
 
+/**
+ * Map SDK endpoint to the flat structure Android expects.
+ */
 function mapEndpoint(ep) {
     if (!ep) return null;
-    const payload = ep.payload ?? {};
+    // SDK endpoints may have these directly
     return {
-        browse_id: payload.browseId ?? null,
-        playlist_id: payload.playlistId ?? null,
-        video_id: payload.videoId ?? null,
-        params: payload.params ?? null,
+        browse_id: ep.payload?.browseId ?? ep.browse_id ?? null,
+        playlist_id: ep.payload?.playlistId ?? ep.playlist_id ?? null,
+        video_id: ep.payload?.videoId ?? ep.video_id ?? null,
+        params: ep.payload?.params ?? ep.params ?? null,
     };
 }
 
-function mapItem(raw) {
-    if (!raw) return null;
-    // MusicTwoRowItem (playlists, albums, artists)
-    const title = getText(raw.title);
-    const subtitle = getText(raw.subtitle);
-    const thumbnail = getThumbnail(raw.thumbnail);
-    const endpoint = mapEndpoint(raw.endpoint);
-    const kind = raw.item_type ?? raw.type ?? 'unknown';
+/**
+ * Map a SDK MusicTwoRowItem / MusicResponsiveListItem to the Item data class.
+ */
+function mapItem(item) {
+    if (!item) return null;
+    try {
+        const title = getText(item.title);
+        const subtitle = getText(item.subtitle);
+        const thumbnail = getThumbnail(item.thumbnail);
+        const endpoint = mapEndpoint(item.endpoint);
+        const kind = item.item_type ?? item.type ?? 'unknown';
 
-    return {
-        kind,
-        title,
-        subtitle,
-        thumbnail,
-        thumbnail_ratio: 1.0,
-        endpoint,
-        artists: null,
-        album: null,
-        duration: null,
-    };
+        return {
+            kind,
+            title,
+            subtitle,
+            thumbnail,
+            thumbnail_ratio: 1.0,
+            endpoint,
+            artists: null,
+            album: null,
+            duration: null,
+        };
+    } catch (e) {
+        console.error('mapItem error:', e.message, item);
+        return null;
+    }
 }
 
-function mapSection(raw) {
-    if (!raw) return null;
-    const title = getText(raw.header?.title) ?? getText(raw.title);
-    const strapline = getText(raw.header?.strapline) ?? null;
-    const items = (raw.contents ?? raw.items ?? [])
-        .map(mapItem)
-        .filter(Boolean);
-    return {
-        type: raw.type ?? null,
-        title,
-        strapline,
-        items,
-        buttons: null,
-        description: null,
-        footer: null,
-    };
+/**
+ * Map a SDK shelf/section to the Section data class.
+ */
+function mapSection(section) {
+    if (!section) return null;
+    try {
+        // SDK: section.header is a MusicCarouselShelfBasicHeader with .title and .strapline
+        const header = section.header;
+        const title = getText(header?.title) ?? getText(section.title) ?? null;
+        const strapline = getText(header?.strapline) ?? null;
+
+        // section.contents is the SDK array of items
+        const contents = section.contents ?? section.items ?? [];
+        const items = contents.map(mapItem).filter(Boolean);
+
+        return {
+            type: section.type ?? null,
+            title,
+            strapline,
+            items,
+            buttons: null,
+            description: null,
+            footer: null,
+        };
+    } catch (e) {
+        console.error('mapSection error:', e.message);
+        return null;
+    }
 }
 
 // ─── Health check ─────────────────────────────────────────────────────────────
@@ -122,9 +156,9 @@ app.get('/api/home', async (req, res) => {
         if (!yt) return res.status(503).json({ error: 'YouTube API not ready yet' });
 
         const home = await yt.music.getHomeFeed();
-        const raw = home.toJSON?.() ?? home;
 
-        const sections = (raw.sections ?? []).map(mapSection).filter(Boolean);
+        // Use SDK sections directly (NOT toJSON() which gives raw internal data)
+        const sections = (home.sections ?? []).map(mapSection).filter(Boolean);
 
         res.json({ background: null, chips: null, sections });
     } catch (err) {
@@ -139,9 +173,7 @@ app.get('/api/explore', async (req, res) => {
         if (!yt) return res.status(503).json({ error: 'YouTube API not ready yet' });
 
         const explore = await yt.music.getExplore();
-        const raw = explore.toJSON?.() ?? explore;
-
-        const sections = (raw.sections ?? []).map(mapSection).filter(Boolean);
+        const sections = (explore.sections ?? []).map(mapSection).filter(Boolean);
         res.json({ top_buttons: null, sections });
     } catch (err) {
         console.error('[/api/explore]', err.message);
@@ -155,9 +187,8 @@ app.get('/api/moods_and_genres', async (req, res) => {
         if (!yt) return res.status(503).json({ error: 'YouTube API not ready yet' });
 
         const moods = await yt.music.getMoodAndGenres();
-        const raw = moods.toJSON?.() ?? moods;
 
-        const sections = (raw.sections ?? []).map((s) => ({
+        const sections = (moods.sections ?? []).map((s) => ({
             title: getText(s.header?.title) ?? getText(s.title) ?? null,
             buttons: (s.items ?? s.contents ?? []).map((b) => ({
                 text: getText(b.title) ?? null,
@@ -182,14 +213,15 @@ app.get('/api/browse', async (req, res) => {
         if (!browse_id) return res.status(400).json({ error: 'browse_id is required' });
 
         const result = await yt.music.browse(browse_id, { params });
-        const raw = result.toJSON?.() ?? result;
 
-        const sections = (raw.sections ?? []).map(mapSection).filter(Boolean);
+        const sections = (result.sections ?? []).map(mapSection).filter(Boolean);
+        const header = result.header;
+
         res.json({
-            title: getText(raw.header?.title) ?? null,
-            subtitle: getText(raw.header?.subtitle) ?? null,
-            thumbnail: getThumbnail(raw.header?.thumbnail?.contents ?? raw.header?.thumbnail) ?? null,
-            description: getText(raw.header?.description) ?? null,
+            title: getText(header?.title) ?? null,
+            subtitle: getText(header?.subtitle) ?? null,
+            thumbnail: getThumbnail(header?.thumbnail?.contents ?? header?.thumbnail) ?? null,
+            description: getText(header?.description) ?? null,
             monthly_listeners: null,
             sections,
         });
@@ -207,9 +239,7 @@ app.get('/api/search', async (req, res) => {
         if (!q) return res.status(400).json({ error: 'q is required' });
 
         const results = await yt.music.search(q);
-        const raw = results.toJSON?.() ?? results;
-
-        const sections = (raw.sections ?? []).map(mapSection).filter(Boolean);
+        const sections = (results.sections ?? []).map(mapSection).filter(Boolean);
         res.json({ background: null, chips: null, sections });
     } catch (err) {
         console.error('[/api/search]', err.message);
