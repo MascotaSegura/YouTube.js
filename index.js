@@ -658,6 +658,17 @@ const AUDIO_STREAM_ATTEMPTS = [
     formatOpts: { type: "audio", quality: "best", format: "mp4" },
     userAgent: ANDROID_USER_AGENT,
   },
+  // WEB como fallback adicional
+  {
+    client: "WEB",
+    formatOpts: { type: "audio", quality: "best", format: "webm" },
+    userAgent: MUSIC_USER_AGENT, // O cualquier UA de navegador
+  },
+  {
+    client: "WEB",
+    formatOpts: { type: "audio", quality: "best", format: "mp4" },
+    userAgent: MUSIC_USER_AGENT,
+  },
   // IOS como último recurso
   {
     client: "IOS",
