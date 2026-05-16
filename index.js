@@ -643,7 +643,11 @@ async function resolveAudioStream(video_id) {
 
   for (const { client, formatOpts, userAgent } of AUDIO_STREAM_ATTEMPTS) {
     try {
-      const format = await youtube.getStreamingData(video_id, { client, ...formatOpts });
+      const format = await youtube.getStreamingData(video_id, {
+        client,
+        ...formatOpts,
+        po_token: process.env.YT_PO_TOKEN,
+      });
       if (!format?.url) continue;
 
       return {
