@@ -11,10 +11,16 @@ app.use(express.json());
 app.use(express.static("."));
 
 Platform.shim.eval = async (data, env) => {
+  // youtubei.js v17: usa extracción AST; data.output contiene el código JS generado
+  const code = data?.output ?? "";
+  if (!code) return {};
+
   const props = [];
   if (env.n) props.push(`n: exportedVars.nFunction("${env.n}")`);
   if (env.sig) props.push(`sig: exportedVars.sigFunction("${env.sig}")`);
-  return new Function(`${data.output}\nreturn { ${props.join(", ")} };`)();
+
+  if (!props.length) return {};
+  return new Function(`${code}\nreturn { ${props.join(", ")} };`)();
 };
 
 const youtube = await Innertube.create({
@@ -619,6 +625,18 @@ const streamCache = new Map();
 
 /** Obtiene URL de audio descifrada probando varios clientes (mejor compatibilidad con ExoPlayer). */
 const AUDIO_STREAM_ATTEMPTS = [
+  // TV_SIMPLY: no requiere po_token, ideal como primer intento
+  {
+    client: "TV_SIMPLY",
+    formatOpts: { type: "audio", quality: "best", format: "mp4" },
+    userAgent: ANDROID_USER_AGENT,
+  },
+  {
+    client: "TV_SIMPLY",
+    formatOpts: { type: "audio", quality: "best", format: "webm" },
+    userAgent: ANDROID_USER_AGENT,
+  },
+  // YTMUSIC con po_token si está disponible
   {
     client: "YTMUSIC",
     formatOpts: { type: "audio", quality: "best", format: "webm" },
@@ -629,6 +647,7 @@ const AUDIO_STREAM_ATTEMPTS = [
     formatOpts: { type: "audio", quality: "best", format: "mp4" },
     userAgent: MUSIC_USER_AGENT,
   },
+  // ANDROID como fallback
   {
     client: "ANDROID",
     formatOpts: { type: "audio", quality: "best", format: "webm" },
@@ -639,6 +658,7 @@ const AUDIO_STREAM_ATTEMPTS = [
     formatOpts: { type: "audio", quality: "best", format: "mp4" },
     userAgent: ANDROID_USER_AGENT,
   },
+  // IOS como último recurso
   {
     client: "IOS",
     formatOpts: { type: "audio", quality: "best", format: "mp4" },
@@ -651,10 +671,15 @@ async function resolveAudioStream(video_id) {
 
   for (const { client, formatOpts, userAgent } of AUDIO_STREAM_ATTEMPTS) {
     try {
+      // CORRECTO: getStreamingData(videoId, GetVideoInfoOptions) donde
+      // GetVideoInfoOptions = { client, po_token } y formatOpts son las opciones de formato.
+      // La firma interna es: getBasicInfo(video_id, { client, po_token }) => chooseFormat(formatOpts)
+      // Por lo tanto pasamos todo junto como un solo objeto de opciones:
       const format = await youtube.getStreamingData(video_id, {
         client,
+        // po_token solo para clientes que lo necesitan (no TV_SIMPLY)
+        ...(process.env.YT_PO_TOKEN && client !== "TV_SIMPLY" ? { po_token: process.env.YT_PO_TOKEN } : {}),
         ...formatOpts,
-        po_token: process.env.YT_PO_TOKEN,
       });
       if (!format?.url) continue;
 
