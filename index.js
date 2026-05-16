@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 import { Readable } from "node:stream";
+import fs from "node:fs";
+import path from "node:path";
 import { Innertube, UniversalCache, Platform, YTNodes, Parser, SectionListContinuation } from "youtubei.js";
 
 const app = express();
@@ -714,13 +716,25 @@ async function resolveAudioStream(video_id) {
   return { error: lastError, debug: debugErrors };
 }
 
+const AUDIO_DIR = path.join(process.cwd(), "downloads");
+if (!fs.existsSync(AUDIO_DIR)) {
+  fs.mkdirSync(AUDIO_DIR, { recursive: true });
+}
+
 app.get("/api/stream", async (req, res) => {
   try {
     const { video_id } = req.query;
     if (!video_id) return res.status(400).json({ error: "video_id requerido" });
 
-    let streamData = streamCache.get(video_id);
+    const filePath = path.join(AUDIO_DIR, `${video_id}.mp4`);
 
+    // Si el archivo ya existe en nuestro servidor, lo servimos directamente
+    if (fs.existsSync(filePath)) {
+      return res.sendFile(filePath);
+    }
+
+    // Si no existe, resolvemos el formato de audio desde YouTube
+    let streamData = streamCache.get(video_id);
     if (!streamData) {
       const resolved = await resolveAudioStream(video_id);
       if (resolved.error) {
@@ -732,26 +746,13 @@ app.get("/api/stream", async (req, res) => {
       setTimeout(() => streamCache.delete(video_id), 3 * 60 * 60 * 1000);
     }
 
-    const { url: fmtUrl, mimeType, totalSize, userAgent } = streamData;
+    const { url: fmtUrl, userAgent } = streamData;
 
-    const clientRange = req.headers["range"];
-    let start = 0;
-    let end;
-    if (clientRange) {
-      const m = clientRange.match(/bytes=(\d+)-(\d*)/);
-      if (m) {
-        start = parseInt(m[1]);
-        end = m[2] ? parseInt(m[2]) : start + CHUNK_SIZE - 1;
-      }
-    }
-    if (end === undefined) end = start + CHUNK_SIZE - 1;
-    if (totalSize) end = Math.min(end, totalSize - 1);
-
+    // Descargamos el archivo a nuestro servidor
     const upstream = await fetch(fmtUrl, {
       headers: {
         ...YT_STREAM_HEADERS,
         "User-Agent": userAgent ?? ANDROID_USER_AGENT,
-        Range: `bytes=${start}-${end}`,
       },
     });
 
@@ -760,15 +761,20 @@ app.get("/api/stream", async (req, res) => {
       return res.status(upstream.status).json({ error: "Error al obtener audio" });
     }
 
-    const upstreamLen = parseInt(upstream.headers.get("content-length") ?? "0");
-    const actualEnd = upstreamLen ? start + upstreamLen - 1 : end;
+    // Guardamos el archivo en disco (se sube a nuestro servidor)
+    const fileStream = fs.createWriteStream(filePath);
+    Readable.fromWeb(upstream.body).pipe(fileStream);
 
-    res.status(206);
-    res.setHeader("Content-Type", mimeType);
-    res.setHeader("Accept-Ranges", "bytes");
-    if (upstreamLen) res.setHeader("Content-Length", upstreamLen);
-    if (totalSize) res.setHeader("Content-Range", `bytes ${start}-${actualEnd}/${totalSize}`);
-    Readable.fromWeb(upstream.body).pipe(res);
+    fileStream.on("finish", () => {
+      // Una vez descargado, lo servimos localmente
+      res.sendFile(filePath);
+    });
+
+    fileStream.on("error", (err) => {
+      console.error("[stream] error saving file:", err);
+      if (!res.headersSent) res.status(500).json({ error: "Error al guardar el archivo" });
+    });
+
   } catch (e) {
     if (!res.headersSent) res.status(500).json({ error: e.message });
   }
