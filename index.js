@@ -22,6 +22,8 @@ const youtube = await Innertube.create({
   location: "MX",
   retrieve_player: true,
   cache: new UniversalCache(false),
+  po_token: process.env.YT_PO_TOKEN,
+  cookie: process.env.YT_COOKIE,
 });
 
 function thumbnailArray(thumb) {
@@ -595,8 +597,58 @@ const YT_STREAM_HEADERS = {
   DNT: "?1",
 };
 const CHUNK_SIZE = 524288;
-const IOS_USER_AGENT = "com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)";
+const ANDROID_USER_AGENT =
+  "com.google.android.youtube/19.32.35 (Linux; U; Android 13) gzip";
+const IOS_USER_AGENT =
+  "com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)";
 const streamCache = new Map();
+
+/** Obtiene URL de audio descifrada probando varios clientes (mejor compatibilidad con ExoPlayer). */
+const AUDIO_STREAM_ATTEMPTS = [
+  {
+    client: "ANDROID",
+    formatOpts: { type: "audio", quality: "best", format: "webm" },
+    userAgent: ANDROID_USER_AGENT,
+  },
+  {
+    client: "ANDROID",
+    formatOpts: { type: "audio", quality: "best", format: "mp4" },
+    userAgent: ANDROID_USER_AGENT,
+  },
+  {
+    client: "IOS",
+    formatOpts: { type: "audio", quality: "best", format: "mp4" },
+    userAgent: IOS_USER_AGENT,
+  },
+  {
+    client: "YTMUSIC",
+    formatOpts: { type: "audio", quality: "best", format: "mp4" },
+    userAgent: ANDROID_USER_AGENT,
+  },
+];
+
+async function resolveAudioStream(video_id) {
+  let lastError = "Sin formato de audio";
+
+  for (const { client, formatOpts, userAgent } of AUDIO_STREAM_ATTEMPTS) {
+    try {
+      const format = await youtube.getStreamingData(video_id, { client, ...formatOpts });
+      if (!format?.url) continue;
+
+      return {
+        url: format.url,
+        mimeType: format.mime_type?.split(";")[0]?.trim() ?? "audio/mp4",
+        totalSize: Number(format.content_length ?? 0),
+        userAgent,
+      };
+    } catch (e) {
+      lastError = e.message ?? String(e);
+      console.warn(`[stream] ${client} ${JSON.stringify(formatOpts)}: ${lastError}`);
+    }
+  }
+
+  return { error: lastError };
+}
 
 app.get("/api/stream", async (req, res) => {
   try {
@@ -606,29 +658,17 @@ app.get("/api/stream", async (req, res) => {
     let streamData = streamCache.get(video_id);
 
     if (!streamData) {
-      const info = await youtube.getBasicInfo(video_id, { client: "IOS" });
-      const status = info.playability_status?.status;
-      if (status !== "OK") {
-        return res.status(403).json({ error: info.playability_status?.reason ?? status });
+      const resolved = await resolveAudioStream(video_id);
+      if (resolved.error) {
+        const status = /bot|sesión|LOGIN|unavailable/i.test(resolved.error) ? 403 : 404;
+        return res.status(status).json({ error: resolved.error });
       }
-
-      const fmt = (info.streaming_data?.adaptive_formats ?? [])
-        .filter((f) => f.has_audio && !f.has_video && f.url && !f.signature_cipher && !f.cipher)
-        .sort((a, b) => b.bitrate - a.bitrate)[0];
-
-      if (!fmt?.url) return res.status(404).json({ error: "Sin formato de audio" });
-
-      streamData = {
-        url: fmt.url,
-        mimeType: fmt.mime_type?.split(";")[0]?.trim() ?? "audio/mp4",
-        totalSize: Number(fmt.content_length ?? 0),
-      };
-
+      streamData = resolved;
       streamCache.set(video_id, streamData);
       setTimeout(() => streamCache.delete(video_id), 3 * 60 * 60 * 1000);
     }
 
-    const { url: fmtUrl, mimeType, totalSize } = streamData;
+    const { url: fmtUrl, mimeType, totalSize, userAgent } = streamData;
 
     const clientRange = req.headers["range"];
     let start = 0;
@@ -646,7 +686,7 @@ app.get("/api/stream", async (req, res) => {
     const upstream = await fetch(fmtUrl, {
       headers: {
         ...YT_STREAM_HEADERS,
-        "User-Agent": IOS_USER_AGENT,
+        "User-Agent": userAgent ?? ANDROID_USER_AGENT,
         Range: `bytes=${start}-${end}`,
       },
     });
@@ -675,18 +715,13 @@ app.get("/api/stream-url", async (req, res) => {
     const { video_id } = req.query;
     if (!video_id) return res.status(400).json({ error: "video_id requerido" });
 
-    const info = await youtube.getBasicInfo(video_id, { client: "YTMUSIC" });
-    const status = info.playability_status?.status;
-    if (status !== "OK") {
-      return res.status(403).json({ error: info.playability_status?.reason ?? status });
+    const resolved = await resolveAudioStream(video_id);
+    if (resolved.error) {
+      const status = /bot|sesión|LOGIN|unavailable/i.test(resolved.error) ? 403 : 404;
+      return res.status(status).json({ error: resolved.error });
     }
 
-    const format = info.chooseFormat({ type: "audio", quality: "best" });
-    if (!format || !format.url) {
-      return res.status(404).json({ error: "Sin formato de audio descifrable" });
-    }
-
-    res.json({ url: format.url, mime_type: format.mime_type ?? "audio/mp4" });
+    res.json({ url: resolved.url, mime_type: resolved.mimeType });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
