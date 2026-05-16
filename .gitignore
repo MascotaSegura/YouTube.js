@@ -1,3 +1,4 @@
 node_modules/
 .env
+.render-env.local.json
 .DS_Store

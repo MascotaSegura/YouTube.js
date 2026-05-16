@@ -21,9 +21,11 @@ const youtube = await Innertube.create({
   lang: "es",
   location: "MX",
   retrieve_player: true,
-  cache: new UniversalCache(false),
+  cache: new UniversalCache(true),
+  enable_session_cache: true,
   po_token: process.env.YT_PO_TOKEN,
   cookie: process.env.YT_COOKIE,
+  visitor_data: process.env.YT_VISITOR_DATA,
 });
 
 function thumbnailArray(thumb) {
@@ -590,10 +592,11 @@ app.get("/api/browse", async (req, res) => {
 });
 
 // ─── Stream ───────────────────────────────────────────────────────────────────
+const HAS_MUSIC_SESSION = !!(process.env.YT_COOKIE || process.env.YT_VISITOR_DATA);
 const YT_STREAM_HEADERS = {
   accept: "*/*",
-  origin: "https://www.youtube.com",
-  referer: "https://www.youtube.com",
+  origin: HAS_MUSIC_SESSION ? "https://music.youtube.com" : "https://www.youtube.com",
+  referer: HAS_MUSIC_SESSION ? "https://music.youtube.com" : "https://www.youtube.com",
   DNT: "?1",
 };
 const CHUNK_SIZE = 524288;
@@ -601,10 +604,23 @@ const ANDROID_USER_AGENT =
   "com.google.android.youtube/19.32.35 (Linux; U; Android 13) gzip";
 const IOS_USER_AGENT =
   "com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)";
+const MUSIC_USER_AGENT =
+  process.env.YT_USER_AGENT ??
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
 const streamCache = new Map();
 
 /** Obtiene URL de audio descifrada probando varios clientes (mejor compatibilidad con ExoPlayer). */
 const AUDIO_STREAM_ATTEMPTS = [
+  {
+    client: "YTMUSIC",
+    formatOpts: { type: "audio", quality: "best", format: "webm" },
+    userAgent: MUSIC_USER_AGENT,
+  },
+  {
+    client: "YTMUSIC",
+    formatOpts: { type: "audio", quality: "best", format: "mp4" },
+    userAgent: MUSIC_USER_AGENT,
+  },
   {
     client: "ANDROID",
     formatOpts: { type: "audio", quality: "best", format: "webm" },
@@ -619,11 +635,6 @@ const AUDIO_STREAM_ATTEMPTS = [
     client: "IOS",
     formatOpts: { type: "audio", quality: "best", format: "mp4" },
     userAgent: IOS_USER_AGENT,
-  },
-  {
-    client: "YTMUSIC",
-    formatOpts: { type: "audio", quality: "best", format: "mp4" },
-    userAgent: ANDROID_USER_AGENT,
   },
 ];
 
