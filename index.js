@@ -668,6 +668,7 @@ const AUDIO_STREAM_ATTEMPTS = [
 
 async function resolveAudioStream(video_id) {
   let lastError = "Sin formato de audio";
+  const debugErrors = [];
 
   for (const { client, formatOpts, userAgent } of AUDIO_STREAM_ATTEMPTS) {
     try {
@@ -681,7 +682,10 @@ async function resolveAudioStream(video_id) {
         ...(process.env.YT_PO_TOKEN && client !== "TV_SIMPLY" ? { po_token: process.env.YT_PO_TOKEN } : {}),
         ...formatOpts,
       });
-      if (!format?.url) continue;
+      if (!format?.url) {
+          debugErrors.push(`${client} ${formatOpts.format}: no url`);
+          continue;
+      }
 
       return {
         url: format.url,
@@ -691,11 +695,12 @@ async function resolveAudioStream(video_id) {
       };
     } catch (e) {
       lastError = e.message ?? String(e);
+      debugErrors.push(`${client} ${formatOpts.format}: ${lastError}`);
       console.warn(`[stream] ${client} ${JSON.stringify(formatOpts)}: ${lastError}`);
     }
   }
 
-  return { error: lastError };
+  return { error: lastError, debug: debugErrors };
 }
 
 app.get("/api/stream", async (req, res) => {
@@ -766,7 +771,7 @@ app.get("/api/stream-url", async (req, res) => {
     const resolved = await resolveAudioStream(video_id);
     if (resolved.error) {
       const status = /bot|sesión|LOGIN|unavailable/i.test(resolved.error) ? 403 : 404;
-      return res.status(status).json({ error: resolved.error });
+      return res.status(status).json({ error: resolved.error, debug: resolved.debug });
     }
 
     res.json({ url: resolved.url, mime_type: resolved.mimeType });
