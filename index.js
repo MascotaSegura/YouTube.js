@@ -23,119 +23,196 @@ initYoutube().catch((err) => {
     process.exit(1);
 });
 
-// ─── Health check ────────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function getText(obj) {
+    if (!obj) return null;
+    if (typeof obj === 'string') return obj;
+    if (obj.text) return obj.text;
+    if (obj.runs?.[0]?.text) return obj.runs[0].text;
+    return null;
+}
+
+function getThumbnail(arr) {
+    if (!Array.isArray(arr) || arr.length === 0) return null;
+    return arr[0].url ?? null;
+}
+
+function mapEndpoint(ep) {
+    if (!ep) return null;
+    const payload = ep.payload ?? {};
+    return {
+        browse_id: payload.browseId ?? null,
+        playlist_id: payload.playlistId ?? null,
+        video_id: payload.videoId ?? null,
+        params: payload.params ?? null,
+    };
+}
+
+function mapItem(raw) {
+    if (!raw) return null;
+    // MusicTwoRowItem (playlists, albums, artists)
+    const title = getText(raw.title);
+    const subtitle = getText(raw.subtitle);
+    const thumbnail = getThumbnail(raw.thumbnail);
+    const endpoint = mapEndpoint(raw.endpoint);
+    const kind = raw.item_type ?? raw.type ?? 'unknown';
+
+    return {
+        kind,
+        title,
+        subtitle,
+        thumbnail,
+        thumbnail_ratio: 1.0,
+        endpoint,
+        artists: null,
+        album: null,
+        duration: null,
+    };
+}
+
+function mapSection(raw) {
+    if (!raw) return null;
+    const title = getText(raw.header?.title) ?? getText(raw.title);
+    const strapline = getText(raw.header?.strapline) ?? null;
+    const items = (raw.contents ?? raw.items ?? [])
+        .map(mapItem)
+        .filter(Boolean);
+    return {
+        type: raw.type ?? null,
+        title,
+        strapline,
+        items,
+        buttons: null,
+        description: null,
+        footer: null,
+    };
+}
+
+// ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
     res.json({ status: 'ok', message: 'YouTube.js API is running' });
 });
 
-// ─── Stream endpoint ─────────────────────────────────────────────────────────
-// GET /api/stream?video_id=<id>
-// Redirects to the best audio-only stream URL.
+// ─── Stream ───────────────────────────────────────────────────────────────────
 app.get('/api/stream', async (req, res) => {
     try {
         const videoId = req.query.video_id;
-        if (!videoId) {
-            return res.status(400).json({ error: 'video_id is required' });
-        }
-        if (!yt) {
-            return res.status(503).json({ error: 'YouTube API not ready yet' });
-        }
+        if (!videoId) return res.status(400).json({ error: 'video_id is required' });
+        if (!yt) return res.status(503).json({ error: 'YouTube API not ready yet' });
 
         const info = await yt.getBasicInfo(videoId, { client: 'ANDROID' });
-
-        // Choose best audio-only format (opus > mp4a, highest bitrate)
         const format = info.chooseFormat({ type: 'audio', quality: 'best' });
+        if (!format) return res.status(404).json({ error: 'No audio format found' });
 
-        if (!format) {
-            return res.status(404).json({ error: 'No audio format found for this video' });
-        }
-
-        // decipher() is async since youtubei.js v16+
         let url = format.decipher(yt.session.player);
         if (url instanceof Promise) url = await url;
+        if (!url) return res.status(404).json({ error: 'Failed to extract stream URL' });
 
-        if (!url) {
-            return res.status(404).json({ error: 'Failed to extract stream URL' });
-        }
-
-        // Redirect so ExoPlayer follows directly to the CDN
         res.redirect(url);
     } catch (err) {
-        console.error('[/api/stream]', err);
+        console.error('[/api/stream]', err.message);
         res.status(500).json({ error: err.message ?? 'Internal Server Error' });
     }
 });
 
-// ─── Home feed ───────────────────────────────────────────────────────────────
-// GET /api/home
+// ─── Home ─────────────────────────────────────────────────────────────────────
 app.get('/api/home', async (req, res) => {
     try {
         if (!yt) return res.status(503).json({ error: 'YouTube API not ready yet' });
-        const music = yt.music;
-        const home = await music.getHomeFeed();
-        res.json(home);
+
+        const home = await yt.music.getHomeFeed();
+        const raw = home.toJSON?.() ?? home;
+
+        const sections = (raw.sections ?? []).map(mapSection).filter(Boolean);
+
+        res.json({ background: null, chips: null, sections });
     } catch (err) {
-        console.error('[/api/home]', err);
+        console.error('[/api/home]', err.message);
         res.status(500).json({ error: err.message ?? 'Internal Server Error' });
     }
 });
 
-// ─── Explore ─────────────────────────────────────────────────────────────────
-// GET /api/explore
+// ─── Explore ──────────────────────────────────────────────────────────────────
 app.get('/api/explore', async (req, res) => {
     try {
         if (!yt) return res.status(503).json({ error: 'YouTube API not ready yet' });
-        const music = yt.music;
-        const explore = await music.getExplore();
-        res.json(explore);
+
+        const explore = await yt.music.getExplore();
+        const raw = explore.toJSON?.() ?? explore;
+
+        const sections = (raw.sections ?? []).map(mapSection).filter(Boolean);
+        res.json({ top_buttons: null, sections });
     } catch (err) {
-        console.error('[/api/explore]', err);
+        console.error('[/api/explore]', err.message);
         res.status(500).json({ error: err.message ?? 'Internal Server Error' });
     }
 });
 
-// ─── Moods & Genres ──────────────────────────────────────────────────────────
-// GET /api/moods_and_genres
+// ─── Moods & Genres ───────────────────────────────────────────────────────────
 app.get('/api/moods_and_genres', async (req, res) => {
     try {
         if (!yt) return res.status(503).json({ error: 'YouTube API not ready yet' });
-        const music = yt.music;
-        const moods = await music.getMoodAndGenres();
-        res.json(moods);
+
+        const moods = await yt.music.getMoodAndGenres();
+        const raw = moods.toJSON?.() ?? moods;
+
+        const sections = (raw.sections ?? []).map((s) => ({
+            title: getText(s.header?.title) ?? getText(s.title) ?? null,
+            buttons: (s.items ?? s.contents ?? []).map((b) => ({
+                text: getText(b.title) ?? null,
+                color: b.background_color?.toString() ?? null,
+                browse_id: b.endpoint?.payload?.browseId ?? null,
+                params: b.endpoint?.payload?.params ?? null,
+            })),
+        }));
+
+        res.json({ sections });
     } catch (err) {
-        console.error('[/api/moods_and_genres]', err);
+        console.error('[/api/moods_and_genres]', err.message);
         res.status(500).json({ error: err.message ?? 'Internal Server Error' });
     }
 });
 
-// ─── Browse ──────────────────────────────────────────────────────────────────
-// GET /api/browse?browse_id=<id>&params=<params>
+// ─── Browse ───────────────────────────────────────────────────────────────────
 app.get('/api/browse', async (req, res) => {
     try {
         if (!yt) return res.status(503).json({ error: 'YouTube API not ready yet' });
         const { browse_id, params } = req.query;
         if (!browse_id) return res.status(400).json({ error: 'browse_id is required' });
-        const music = yt.music;
-        const result = await music.browse(browse_id, { params });
-        res.json(result);
+
+        const result = await yt.music.browse(browse_id, { params });
+        const raw = result.toJSON?.() ?? result;
+
+        const sections = (raw.sections ?? []).map(mapSection).filter(Boolean);
+        res.json({
+            title: getText(raw.header?.title) ?? null,
+            subtitle: getText(raw.header?.subtitle) ?? null,
+            thumbnail: getThumbnail(raw.header?.thumbnail?.contents ?? raw.header?.thumbnail) ?? null,
+            description: getText(raw.header?.description) ?? null,
+            monthly_listeners: null,
+            sections,
+        });
     } catch (err) {
-        console.error('[/api/browse]', err);
+        console.error('[/api/browse]', err.message);
         res.status(500).json({ error: err.message ?? 'Internal Server Error' });
     }
 });
 
-// ─── Search ──────────────────────────────────────────────────────────────────
-// GET /api/search?q=<query>
+// ─── Search ───────────────────────────────────────────────────────────────────
 app.get('/api/search', async (req, res) => {
     try {
         if (!yt) return res.status(503).json({ error: 'YouTube API not ready yet' });
         const { q } = req.query;
         if (!q) return res.status(400).json({ error: 'q is required' });
-        const music = yt.music;
-        const results = await music.search(q);
-        res.json(results);
+
+        const results = await yt.music.search(q);
+        const raw = results.toJSON?.() ?? results;
+
+        const sections = (raw.sections ?? []).map(mapSection).filter(Boolean);
+        res.json({ background: null, chips: null, sections });
     } catch (err) {
-        console.error('[/api/search]', err);
+        console.error('[/api/search]', err.message);
         res.status(500).json({ error: err.message ?? 'Internal Server Error' });
     }
 });
